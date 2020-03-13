@@ -2,7 +2,10 @@
   (:require
    [re-frame.core :as r]
    [re-frame.loggers :refer [console]]
+   [re-frame.interop   :refer [make-reaction reagent-id]]
    [re-posh.db :refer [store]]
+   [re-frame.trace :as trace :include-macros true]
+   [re-frame.utils     :refer [first-in-vector]]
    [reagent.ratom :refer-macros [reaction]]
    [posh.reagent  :as p]))
 
@@ -135,13 +138,28 @@
        (if (= (count input-args) 0)
          ;; if there is no inputs-fn provided (or sugar version) don't wrap anything in reaction,
          ;; just return posh's query or pull
-         (execute-sub (config-fn @@store params))
-         (reaction
-          (let [inputs (inputs-fn params)
-                signals (if (list? inputs)
-                          (map deref inputs)
-                          (deref inputs))]
-            @(execute-sub (config-fn signals params)))))))))
+         (trace/with-trace {:operation (first-in-vector params)
+                            :op-type   :sub/run
+                            :tags      {:query-v   params}}
+           (let [value (execute-sub (config-fn @@store params))]
+             (trace/merge-trace! {:tags {:value value}})
+             value))
+         (let [reaction-id (atom nil)
+               reaction (make-reaction
+                         (fn []
+                           (trace/with-trace {:operation (first-in-vector params)
+                                              :op-type   :sub/run
+                                              :tags      {:query-v   params
+                                                          :reaction  @reaction-id}}
+                             (let [inputs (inputs-fn params)
+                                   signals (if (list? inputs)
+                                             (map deref inputs)
+                                             (deref inputs))
+                                   value @(execute-sub (config-fn signals params))]
+                               (trace/merge-trace! {:tags {:value value}})
+                               value))))]
+           (reset! reaction-id (reagent-id reaction))
+           reaction))))))
 
 (defn reg-query-sub
   "Syntax sugar for writing queries. It allows writing query subscription
